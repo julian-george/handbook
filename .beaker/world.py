@@ -320,6 +320,3 @@ class World:
             if not initial_path.is_file() or initial_path.read_bytes() != content:
                 changed[str(relative)] = content
         return changed
-
-    def close(self) -> None:
-        shutil.rmtree(self.case_dir, ignore_errors=True)

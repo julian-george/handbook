@@ -32,11 +32,13 @@ from beaker import (
     inference_target,
     repository,
 )
+from beaker.sdk.utils import to_json_safe
+from beaker.tracing import current_trace
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 from world import TASKS_DIR, World
 
-DEFAULT_MODEL = "gpt-5.6-luna"
+DEFAULT_MODEL = "gpt-6-luna"
 MAX_AGENT_STEPS = 40
 CASE_TIMEOUT_SECONDS = 600
 
@@ -67,6 +69,13 @@ def _task_environment(task_dir: Path) -> dict[str, str]:
     return tomllib.loads((task_dir / "task.toml").read_text())["environment"]["env"]
 
 
+def _candidate_root() -> Path:
+    for root in (Path.cwd(), Path(__file__).resolve().parents[1]):
+        if (root / "candidate").is_dir():
+            return root
+    raise FileNotFoundError("candidate/ directory not found")
+
+
 def _client_and_model(runtime: RolloutRuntime[Any]) -> tuple[AsyncOpenAI, str]:
     """The selected model through Beaker's gateway, else the default through the provider proxy."""
     if runtime.model:
@@ -82,7 +91,11 @@ async def _run_agent(client: AsyncOpenAI, model: str, world: World, system_promp
         {"role": "user", "content": instruction},
     ]
     for step in range(MAX_AGENT_STEPS):
-        response = await client.chat.completions.create(model=model, messages=messages, tools=tools)
+        with current_trace().model_call(
+            operation="chat.completions", provider="openai", model=model, input_messages=messages
+        ) as model_call:
+            response = await client.chat.completions.create(model=model, messages=messages, tools=tools)
+            model_call.output(to_json_safe(response))
         message = response.choices[0].message
         messages.append(message.model_dump(exclude_none=True))
         if not message.tool_calls:
@@ -90,9 +103,12 @@ async def _run_agent(client: AsyncOpenAI, model: str, world: World, system_promp
         for call in message.tool_calls:
             try:
                 arguments = json.loads(call.function.arguments or "{}")
-                result = await world.call_tool(call.function.name, arguments)
             except json.JSONDecodeError as error:
                 result = f"Error: invalid JSON arguments: {error}"
+            else:
+                with current_trace().tool_call(call.function.name, arguments=arguments, call_id=call.id) as tool_call:
+                    result = await world.call_tool(call.function.name, arguments)
+                    tool_call.output(result)
             messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
     return MAX_AGENT_STEPS
 
@@ -100,15 +116,15 @@ async def _run_agent(client: AsyncOpenAI, model: str, world: World, system_promp
 async def run_case(*, case_input: JsonValue, runtime: RolloutRuntime[Any]) -> CaseResult:
     task_dir = _task_dir(case_input)
     environment = _task_environment(task_dir)
-    candidate_prompt = (Path(runtime.targets_dir) / "candidate" / "system_prompt.md").read_text()
+    candidate_prompt = (_candidate_root() / "candidate" / "system_prompt.md").read_text()
     system_prompt = f"{candidate_prompt.strip()}\n\n{(task_dir / 'system_prompt.md').read_text().strip()}"
     instruction = (task_dir / "instruction.md").read_text().strip()
     client, model = _client_and_model(runtime)
     case_dir = Path(tempfile.mkdtemp(prefix="handbook-case-"))
-    world = await World.create(
-        task_dir, case_dir / "world", environment["HANDBOOK_TOOL_SETS"].split(), environment["HANDBOOK_CURRENT_TIME"]
-    )
     try:
+        world = await World.create(
+            task_dir, case_dir, environment["HANDBOOK_TOOL_SETS"].split(), environment["HANDBOOK_CURRENT_TIME"]
+        )
         with runtime.trace.stage("handbook.agent_loop", inputs={"task": task_dir.name, "model": model}) as stage:
             try:
                 steps = await asyncio.wait_for(
@@ -125,7 +141,7 @@ async def run_case(*, case_input: JsonValue, runtime: RolloutRuntime[Any]) -> Ca
         }
     finally:
         await client.close()
-        world.close()
+        shutil.rmtree(case_dir, ignore_errors=True)
     return CaseResult(
         output={"steps": steps, "changed_workspace_files": sorted(workspace_changes)},
         output_kind="record",
