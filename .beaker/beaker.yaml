@@ -1,0 +1,18 @@
+# Beaker configuration. Safe to commit; keep secret values out of this file.
+default_integration: handbook-sop-office-assistant
+integrations:
+  handbook-sop-office-assistant:
+    entrypoint: beaker_integration:integration
+    source_dir: .
+    package_import_root: .beaker
+    environment_base: "debian_slim:3.13"
+    agent_key: handbook-sop-office-assistant
+    pip_install:
+      - "fastmcp>=3,<4"
+      - "pydantic[email]>=2.12.5"
+      - "starlette>=0.50"
+      - "uvicorn>=0.38"
+      - "openai"
+      - "openpyxl"
+      - "pdfplumber"
+      - "python-docx"
