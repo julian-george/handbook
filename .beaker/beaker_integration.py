@@ -39,8 +39,9 @@ from pydantic import BaseModel, Field
 from world import TASKS_DIR, World
 
 DEFAULT_MODEL = "gpt-6-luna"
-MAX_AGENT_STEPS = 40
-CASE_TIMEOUT_SECONDS = 600
+REASONING_EFFORT = "medium"
+MAX_AGENT_STEPS = 12
+CASE_TIMEOUT_SECONDS = 180
 
 
 class TaskRow(BaseModel):
@@ -84,7 +85,20 @@ def _client_and_model(runtime: RolloutRuntime[Any]) -> tuple[AsyncOpenAI, str]:
     return AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"), max_retries=0), DEFAULT_MODEL
 
 
-async def _run_agent(client: AsyncOpenAI, model: str, world: World, system_prompt: str, instruction: str) -> int:
+async def _execute_tool_call(world: World, call: Any) -> dict[str, Any]:
+    try:
+        arguments = json.loads(call.function.arguments or "{}")
+    except json.JSONDecodeError as error:
+        return {"role": "tool", "tool_call_id": call.id, "content": f"Error: invalid JSON arguments: {error}"}
+    with current_trace().tool_call(call.function.name, arguments=arguments, call_id=call.id) as tool_call:
+        result = await world.call_tool(call.function.name, arguments)
+        tool_call.output(result)
+    return {"role": "tool", "tool_call_id": call.id, "content": result}
+
+
+async def _run_agent(
+    client: AsyncOpenAI, model: str, world: World, system_prompt: str, instruction: str, request_options: dict[str, Any]
+) -> int:
     tools = [{"type": "function", "function": spec} for spec in world.tool_specs]
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -94,22 +108,15 @@ async def _run_agent(client: AsyncOpenAI, model: str, world: World, system_promp
         with current_trace().model_call(
             operation="chat.completions", provider="openai", model=model, input_messages=messages
         ) as model_call:
-            response = await client.chat.completions.create(model=model, messages=messages, tools=tools)
+            response = await client.chat.completions.create(
+                model=model, messages=messages, tools=tools, **request_options
+            )
             model_call.output(to_json_safe(response))
         message = response.choices[0].message
         messages.append(message.model_dump(exclude_none=True))
         if not message.tool_calls:
             return step + 1
-        for call in message.tool_calls:
-            try:
-                arguments = json.loads(call.function.arguments or "{}")
-            except json.JSONDecodeError as error:
-                result = f"Error: invalid JSON arguments: {error}"
-            else:
-                with current_trace().tool_call(call.function.name, arguments=arguments, call_id=call.id) as tool_call:
-                    result = await world.call_tool(call.function.name, arguments)
-                    tool_call.output(result)
-            messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+        messages.extend(await asyncio.gather(*(_execute_tool_call(world, call) for call in message.tool_calls)))
     return MAX_AGENT_STEPS
 
 
@@ -120,6 +127,7 @@ async def run_case(*, case_input: JsonValue, runtime: RolloutRuntime[Any]) -> Ca
     system_prompt = f"{candidate_prompt.strip()}\n\n{(task_dir / 'system_prompt.md').read_text().strip()}"
     instruction = (task_dir / "instruction.md").read_text().strip()
     client, model = _client_and_model(runtime)
+    request_options = {} if runtime.model else {"reasoning_effort": REASONING_EFFORT}
     case_dir = Path(tempfile.mkdtemp(prefix="handbook-case-"))
     try:
         world = await World.create(
@@ -128,7 +136,7 @@ async def run_case(*, case_input: JsonValue, runtime: RolloutRuntime[Any]) -> Ca
         with runtime.trace.stage("handbook.agent_loop", inputs={"task": task_dir.name, "model": model}) as stage:
             try:
                 steps = await asyncio.wait_for(
-                    _run_agent(client, model, world, system_prompt, instruction), CASE_TIMEOUT_SECONDS
+                    _run_agent(client, model, world, system_prompt, instruction, request_options), CASE_TIMEOUT_SECONDS
                 )
             except TimeoutError as error:
                 stage.output({"error": "timeout"})

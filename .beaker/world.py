@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGES_DIR = REPO_ROOT / "docker" / "packages"
 TASKS_DIR = REPO_ROOT / "tasks"
 
-MAX_TOOL_RESULT_CHARS = 8000
+MAX_TOOL_RESULT_CHARS = 2000
 BASH_TIMEOUT_SECONDS = 60
 
 
