@@ -264,8 +264,13 @@ class World:
 
         async with _world_lock:
             self._install(spec)
+            call_task = asyncio.ensure_future(asyncio.to_thread(call_in_worker_loop))
             try:
-                result = await asyncio.to_thread(call_in_worker_loop)
+                result = await asyncio.shield(call_task)
+            except asyncio.CancelledError:
+                # The worker thread must finish before the lock frees these globals for another case.
+                await asyncio.wait({call_task})
+                raise
             finally:
                 self._capture(spec)
         text = "\n".join(part.text for part in result.content if hasattr(part, "text"))

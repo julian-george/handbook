@@ -25,7 +25,6 @@ from beaker import (
     Check,
     Integration,
     JsonValue,
-    RetryableCaseError,
     RolloutRuntime,
     RunSetup,
     SetupRuntime,
@@ -41,7 +40,7 @@ from world import TASKS_DIR, World
 DEFAULT_MODEL = "gpt-6-luna"
 REASONING_EFFORT = "low"
 MAX_AGENT_STEPS = 32
-CASE_TIMEOUT_SECONDS = 300
+CASE_TIMEOUT_SECONDS = 240
 
 
 class TaskRow(BaseModel):
@@ -142,10 +141,12 @@ async def run_case(*, case_input: JsonValue, runtime: RolloutRuntime[Any]) -> Ca
                 steps = await asyncio.wait_for(
                     _run_agent(client, model, world, system_prompt, instruction, request_options), CASE_TIMEOUT_SECONDS
                 )
-            except TimeoutError as error:
-                stage.output({"error": "timeout"})
-                raise RetryableCaseError(f"timeout after {CASE_TIMEOUT_SECONDS}s") from error
-            stage.output({"steps": steps})
+            except TimeoutError:
+                # Like AutomationBench: score the world as the agent left it, don't rerun the case.
+                steps, timed_out = None, True
+            else:
+                timed_out = False
+            stage.output({"steps": steps, "timed_out": timed_out})
         service_states = await world.service_states()
         workspace_changes = {
             relative: base64.b64encode(content).decode()
@@ -155,7 +156,7 @@ async def run_case(*, case_input: JsonValue, runtime: RolloutRuntime[Any]) -> Ca
         await client.close()
         shutil.rmtree(case_dir, ignore_errors=True)
     return CaseResult(
-        output={"steps": steps, "changed_workspace_files": sorted(workspace_changes)},
+        output={"steps": steps, "timed_out": timed_out, "changed_workspace_files": sorted(workspace_changes)},
         output_kind="record",
         context={"service_states": service_states, "workspace_changes": workspace_changes},
     )
