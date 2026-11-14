@@ -133,8 +133,13 @@ async def run_case(*, case_input: JsonValue, runtime: RolloutRuntime[Any]) -> Ca
     request_options = {} if runtime.model else {"reasoning_effort": REASONING_EFFORT}
     case_dir = Path(tempfile.mkdtemp(prefix="handbook-case-"))
     try:
+        knowledge_dir = _candidate_root() / "candidate" / "knowledge" / task_dir.name
         world = await World.create(
-            task_dir, case_dir, environment["HANDBOOK_TOOL_SETS"].split(), environment["HANDBOOK_CURRENT_TIME"]
+            task_dir,
+            case_dir,
+            environment["HANDBOOK_TOOL_SETS"].split(),
+            environment["HANDBOOK_CURRENT_TIME"],
+            knowledge_dir if knowledge_dir.is_dir() else None,
         )
         with runtime.trace.stage("handbook.agent_loop", inputs={"task": task_dir.name, "model": model}) as stage:
             try:

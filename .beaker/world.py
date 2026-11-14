@@ -26,6 +26,7 @@ TASKS_DIR = REPO_ROOT / "tasks"
 
 MAX_TOOL_RESULT_CHARS = 2000
 BASH_TIMEOUT_SECONDS = 60
+KNOWLEDGE_DIRNAME = "knowledge"
 
 
 @dataclass(frozen=True)
@@ -143,9 +144,13 @@ class World:
         self._tool_routes: dict[str, tuple[str, str]] = {}
 
     @classmethod
-    async def create(cls, task_dir: Path, case_dir: Path, tool_sets: list[str], current_time: str) -> World:
+    async def create(
+        cls, task_dir: Path, case_dir: Path, tool_sets: list[str], current_time: str, knowledge_dir: Path | None = None
+    ) -> World:
         world = cls(task_dir, case_dir, tool_sets, current_time)
         shutil.copytree(task_dir / "environment" / "initial_workspace", world.workdir)
+        if knowledge_dir is not None:
+            shutil.copytree(knowledge_dir, world.workdir / KNOWLEDGE_DIRNAME)
         async with _world_lock:
             for spec in SERVICES.values():
                 world._init_service(spec)
@@ -333,6 +338,8 @@ class World:
             if not path.is_file():
                 continue
             relative = path.relative_to(self.workdir)
+            if relative.parts[0] == KNOWLEDGE_DIRNAME:
+                continue
             initial_path = initial_dir / relative
             content = path.read_bytes()
             if not initial_path.is_file() or initial_path.read_bytes() != content:
