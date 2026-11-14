@@ -180,6 +180,8 @@ class World:
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+        for snapshot_path_name in ("_final_path", "_bundle_state_path"):
+            setattr(state_module, snapshot_path_name, None)
         self._capture(spec)
 
     def _install(self, spec: ServiceSpec) -> None:
@@ -251,11 +253,19 @@ class World:
     async def _call_service_tool(self, exposed_name: str, arguments: dict[str, Any]) -> str:
         service_name, tool_name = self._tool_routes[exposed_name]
         spec = SERVICES[service_name]
+        server = self._modules[service_name][1]
+
+        def call_in_worker_loop() -> Any:
+            async def call() -> Any:
+                async with Client(server.mcp) as client:
+                    return await client.call_tool(tool_name, arguments, raise_on_error=False)
+
+            return asyncio.run(call())
+
         async with _world_lock:
             self._install(spec)
             try:
-                async with Client(self._modules[service_name][1].mcp) as client:
-                    result = await client.call_tool(tool_name, arguments, raise_on_error=False)
+                result = await asyncio.to_thread(call_in_worker_loop)
             finally:
                 self._capture(spec)
         text = "\n".join(part.text for part in result.content if hasattr(part, "text"))
@@ -275,6 +285,9 @@ class World:
                 timeout=BASH_TIMEOUT_SECONDS,
             )
             return json.dumps({"stdout": completed.stdout, "stderr": completed.stderr, "returncode": completed.returncode})
+        return await asyncio.to_thread(self._file_tool, tool_name, arguments)
+
+    def _file_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         if tool_name == "listFiles":
             directory = self._resolve(arguments.get("directory", "."))
             entries = sorted(directory.iterdir())

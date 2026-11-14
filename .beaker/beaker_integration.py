@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 from world import TASKS_DIR, World
 
 DEFAULT_MODEL = "gpt-6-luna"
-REASONING_EFFORT = "medium"
+REASONING_EFFORT = "low"
 MAX_AGENT_STEPS = 32
 CASE_TIMEOUT_SECONDS = 300
 
@@ -113,7 +113,11 @@ async def _run_agent(
             )
             model_call.output(to_json_safe(response))
         message = response.choices[0].message
-        messages.append(message.model_dump(exclude_none=True))
+        # Replaying the model's encrypted reasoning items each turn only inflates the context.
+        assistant_message: dict[str, Any] = {"role": "assistant", "content": message.content}
+        if message.tool_calls:
+            assistant_message["tool_calls"] = [call.model_dump(exclude_none=True) for call in message.tool_calls]
+        messages.append(assistant_message)
         if not message.tool_calls:
             return step + 1
         messages.extend(await asyncio.gather(*(_execute_tool_call(world, call) for call in message.tool_calls)))
