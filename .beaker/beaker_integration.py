@@ -40,8 +40,8 @@ from world import TASKS_DIR, World
 
 DEFAULT_MODEL = "gpt-6-luna"
 REASONING_EFFORT = "medium"
-MAX_AGENT_STEPS = 12
-CASE_TIMEOUT_SECONDS = 180
+MAX_AGENT_STEPS = 32
+CASE_TIMEOUT_SECONDS = 300
 
 
 class TaskRow(BaseModel):
